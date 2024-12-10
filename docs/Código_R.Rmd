@@ -1,0 +1,288 @@
+---
+title: "Visual analytics of hotel bookings data"
+author: "Stefan Anca"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+## Cargar packages necesarios
+
+```{r packages, warning=FALSE}
+library("ggmosaic")
+library("ggplot2")
+library("fitdistrplus")
+library("MASS")
+library("survival")
+library("ggstatsplot")
+library("tidyverse")
+```
+
+## Carga de datos y preprocesamiento de los ejercicios y los que ya vienen en el notebook
+
+En vez de ejecutar todo el notebook cada vez, ejecuto solo los comandos que modifican los datos para partir con ellos tal y como los deja el script que se nos proporciona.
+
+```{r load data, warning=FALSE}
+x=read.csv("hotel_bookings.csv", stringsAsFactors = T)
+x=x[x$adults<10,]
+x=x[x$children<10,]
+x=x[x$babies<10,]
+x[is.na(x$children),'children']=0
+x=x[x$adr>0 & (x$stays_in_week_nights+x$stays_in_weekend_nights)>0 & (x$adults+x$children+x$babies)>0 & !is.na(x$children),]
+x$dia=as_date(paste0(x$arrival_date_year,'-',x$arrival_date_month,'-',x$arrival_date_day_of_month))
+
+x$tipo=ifelse(x$stays_in_weekend_nights==0, "work",
+       ifelse(x$stays_in_week_nights==0, "weekend",
+       ifelse(x$stays_in_week_nights==1 & wday(x$dia)==6, "weekend",
+       ifelse(x$stays_in_week_nights==5 & (x$stays_in_weekend_nights==3 | x$stays_in_weekend_nights==4), "package",
+       ifelse(x$stays_in_week_nights<=5 & x$stays_in_weekend_nights<3, "work+rest",
+       "rest")))))
+```
+
+
+# ANÁLISIS PARA LA PEC
+
+**Analisis de las variables cuantitativas**
+
+Para la analítica visual usaré histogramas de las distintas variables, para poder conocer su aspecto.
+
+```{r, warning=FALSE}
+cuantitativas <- x[, sapply(x, is.numeric)]
+
+par(mfrow = c(1,4))
+for (i in 1:ncol(cuantitativas)) {
+  hist(cuantitativas[[i]], 
+       main = paste0(colnames(cuantitativas)[i]), 
+       xlab = colnames(cuantitativas)[i], 
+       col = "lightblue", 
+       border = "black")
+}
+```
+
+**Analisis de las variables cualitativas**
+
+Para la analítica visual de estas, simplemente he creado gráficas de barras de algunas.
+
+```{r}
+barplot(table(x$meal))
+```
+
+
+```{r}
+barplot(table(x$customer_type))
+```
+
+```{r}
+barplot(table(x$distribution_channel))
+```
+
+Para alguna variables también he probado otro tipo de opciones, como una simple tabla cruzada.
+
+
+```{r}
+table(x$country)
+```
+Vemos como USA tiene 2085 casos y CN tiene 1275 (Enlace evidenciando que el código "CN" pertenece a China: https://www.iso.org/obp/ui/#iso:code:3166:CN)
+
+**Creación de algunas figuras usadas para crear la infografía**
+
+```{r, warning=FALSE}
+# La primera va a ser un treemap
+library(treemap)
+country_freq <- data.frame(table(x$country))
+
+# Los paises que no aporten al menos 100 turistas anuales, serán agrupados en una única categía
+min_threshold <- 100
+
+# Creación una nueva columna que etiquete países con menos del umbral como "Otros"
+country_freq$Group <- ifelse(country_freq$Freq < min_threshold, "Casos minoritarios", as.character(country_freq$Var1))
+
+# Filtrado de estos casos
+casos_minoritarios <- country_freq[country_freq['Group']=='Casos minoritarios',]
+
+# Agrupar los datos: sumar las frecuencias por grupo
+country_freq_grouped <- aggregate(Freq ~ Group, data = country_freq, sum)
+
+# Ordenar por frecuencia descendente
+country_freq_grouped <- country_freq_grouped[order(-country_freq_grouped$Freq), ]
+
+
+
+# Asignar colores específicos a ciertos grupos
+custom_colors <- c(
+  "CN" = "lightcoral",
+  "USA" = "lightcoral"
+)
+
+# Asignar colores por defecto para los demás
+default_palette <- colorRampPalette(colors = c("lightblue", "#90EE90"))
+country_freq_grouped$Color <- ifelse(
+  country_freq_grouped$Group %in% names(custom_colors),
+  custom_colors[country_freq_grouped$Group],
+  default_palette(nrow(country_freq_grouped)) # Colores para los demás
+)
+
+# Código para exportar con alta calidad la imagen con la que representaré las frecuencias
+#png("treemap.png", width = 3000, height = 2000, res = 300)
+
+# Creación de un treemap
+treemap(
+  country_freq_grouped,
+  index = "Group",         # Categorías
+  vSize = "Freq",          # Tamaño
+  vColor = "Color",        # Colores personalizados
+  type = "color",          # Usa colores definidos
+  title = "Distribución de Frecuencias | Casos totales = 117397"
+)
+
+# Cierre y guardado del archivo
+#dev.off()
+```
+
+
+# Comparativa USA-China
+
+```{r}
+china_data <- x[x['country']=='CN',]
+usa_data <- x[x['country']=='USA',]
+
+
+# Calcular el rango combinado para ADR
+common_range <- range(c(china_data$adr, usa_data$adr), na.rm = TRUE)
+
+# Crear bins comunes
+breaks <- seq(common_range[1], common_range[2], length.out = 15) 
+
+# Calcular histogramas en frecuencia relativa
+china_hist <- hist(china_data$adr, breaks = breaks, plot = FALSE)
+usa_hist <- hist(usa_data$adr, breaks = breaks, plot = FALSE)
+
+china_rel_freq <- china_hist$counts / sum(china_hist$counts)  # Frecuencia relativa
+usa_rel_freq <- usa_hist$counts / sum(usa_hist$counts)        # Frecuencia relativa
+
+# Calcular densidades
+china_density <- density(china_data$adr, na.rm = TRUE)
+usa_density <- density(usa_data$adr, na.rm = TRUE)
+
+# Ajustar densidades al área del histograma
+china_density$y <- china_density$y * max(china_rel_freq) / max(china_density$y)
+usa_density$y <- usa_density$y * max(usa_rel_freq) / max(usa_density$y)
+
+# Dibujar el histograma para China
+plot(china_hist$mids, china_rel_freq, type = "h", col = rgb(0.1, 0.2, 0.8, 0.5), 
+     lwd = 15, main = "Distribución de ADR con Frecuencia Relativa y Densidad", 
+     xlab = "ADR", ylab = "Frecuencia Relativa", 
+     xlim = common_range, ylim = c(0, max(china_rel_freq, usa_rel_freq, china_density$y, usa_density$y) + 0.02))
+
+# Superponer el histograma para USA
+lines(usa_hist$mids, usa_rel_freq, type = "h", col = rgb(0.2, 0.8, 0.2, 0.5), lwd = 15)
+
+# Agregar las curvas de densidad
+lines(china_density, col = "blue", lwd = 2)
+lines(usa_density, col = "green", lwd = 2)
+
+# Agregar una leyenda
+legend("topright", legend = c("China - Histograma", "USA - Histograma", "China - Densidad Normalizada", "USA - Densidad Normalizada"),
+       fill = c(rgb(0.1, 0.2, 0.8, 0.5), rgb(0.2, 0.8, 0.2, 0.5), NA, NA),
+       border = NA, lty = c(NA, NA, 1, 1), col = c(NA, NA, "blue", "green"), lwd = c(NA, NA, 2, 2))
+
+```
+
+
+
+```{r, warning=FALSE}
+# Unión de datos de ambos paises
+china_usa <- rbind(china_data, usa_data)
+# Cambio de la etiqueta "CN", por "China"
+china_usa$country <- as.character(china_usa$country)
+china_usa$country[china_usa$country == "CN"] <- "China"
+
+# Creación de boxplots de la variable "lead_time" para cada
+library(ggpubr)
+ggboxplot(
+  china_usa,
+  x = "country",
+  y = "lead_time",
+  fill = "country",
+  palette = c("skyblue", "lightgreen"),
+  outlier.shape = 16,
+  outlier.size = 2
+) +
+  labs(
+    title = "Días de antelación de la reserva por país",
+    x = "Country",
+    y = "Lead Time"
+  ) +
+  theme_pubclean() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+
+## Preparación de los datos para el gráfico interactivo
+
+Para hacer un gráfico interactivo en infogram, he preparado los datos en el formato requerido desde R. El formato que se obtiene es uno en el que las columnas representan a cada país, y las filas a cada categoría, de modo que en cada celda, se muestra el conteo de una categoría especifica en un país en concreto.
+
+El output obtenido recibió algún tratamiento adicional en Excel (cambios de algunos nombres y elminación de algunos casos poco infomativos).
+
+```{r}
+count_customer_type <- china_usa %>%
+  group_by(country, customer_type) %>%
+  summarize(Frecuencia = n(), .groups = "drop") %>%
+  pivot_wider(
+    names_from = country,
+    values_from = Frecuencia,
+    values_fill = list(Frecuencia = 0)
+  )
+
+count_customer_type
+
+count_market_segment <- china_usa %>%
+  group_by(country, market_segment) %>%
+  summarize(Frecuencia = n(), .groups = "drop") %>%
+  pivot_wider(
+    names_from = country,
+    values_from = Frecuencia,
+    values_fill = list(Frecuencia = 0)
+  )
+
+count_meal <- china_usa %>%
+  group_by(country, meal) %>%
+  summarize(Frecuencia = n(), .groups = "drop") %>%
+  pivot_wider(
+    names_from = country,
+    values_from = Frecuencia,
+    values_fill = list(Frecuencia = 0)
+  )
+
+count_meal
+
+count_tipo <- china_usa %>%
+  group_by(country, tipo) %>%
+  summarize(Frecuencia = n(), .groups = "drop") %>%
+  pivot_wider(
+    names_from = country,
+    values_from = Frecuencia,
+    values_fill = list(Frecuencia = 0)
+  )
+
+count_tipo
+```
+
+```{r}
+# Código para exportar los dataframes a un archivo Excel con múltiples hojas
+#library(writexl)
+#write_xlsx(list(
+#              CustomerType = count_customer_type,
+#              Meal = count_meal,
+#              Tipo = count_tipo,
+#              MarketSegment = count_market_segment
+#              ),
+#           path = "output.xlsx")
+```
+
+
+
+
